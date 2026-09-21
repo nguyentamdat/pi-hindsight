@@ -143,7 +143,7 @@ Show active project identity: project:<id> tag, derivation (pin/remote/basename)
 
 ### `hindsight_config`
 
-Get or patch allowlisted Pi Hindsight config (project or global file). action=get returns effective values (no secrets) and the allowlist. action=patch updates only typed allowlisted keys (setupComplete, scopeMode, projectId, projectIdStrategy, includeSharedObservations, projectBankId, enableGlobalBank, globalBankId, agentUse, mentalModelsInject, memoryProfile, recall/retain knobs, baseUrl, apiKeyEnvVar, timeoutMs). dryRun defaults true for patch. Domain-tagged setupComplete requires projectBankId. Never pass raw API keys — use apiKeyEnvVar.
+Get or patch allowlisted Pi Hindsight config (project or global file). action=get returns effective values (no secrets) and the allowlist. action=patch updates only typed allowlisted keys (setupComplete, scopeMode, projectId, projectIdStrategy, includeSharedObservations, userScopeTags, projectBankId, enableGlobalBank, globalBankId, agentUse, mentalModelsInject, memoryProfile, recall/retain knobs, baseUrl, apiKeyEnvVar, timeoutMs). dryRun defaults true for patch. Domain-tagged setupComplete requires projectBankId. Never pass raw API keys — use apiKeyEnvVar.
 
 | Parameter | Type              | Required | Description                                                      |
 | --------- | ----------------- | -------- | ---------------------------------------------------------------- |
@@ -154,7 +154,7 @@ Get or patch allowlisted Pi Hindsight config (project or global file). action=ge
 
 ### `hindsight_bank`
 
-Inspect or update the selected coding/life bank. action=get returns profile/stats/config. action=update_mission patches retain/reflect/observations mission (dryRun default true for safety).
+Inspect or update the selected coding/life bank. action=get returns exists/stats/config (list-banks existence; retired /profile is not a hard failure). action=update_mission patches retain/reflect/observations mission (dryRun default true for safety).
 
 | Parameter             | Type                  | Required | Description                                                              |
 | --------------------- | --------------------- | -------- | ------------------------------------------------------------------------ |

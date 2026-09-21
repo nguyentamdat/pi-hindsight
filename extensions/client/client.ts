@@ -7,6 +7,7 @@ import {
   sdk,
 } from "@vectorize-io/hindsight-client";
 import type { BankTemplateManifest, Client, ReflectRequest } from "@vectorize-io/hindsight-client";
+import { isGoneError } from "../banks/bank-operations.js";
 import { redactError } from "../utils/sanitize.js";
 import type { HindsightLikeClient, ResolvedConfig } from "../types.js";
 import { PI_HINDSIGHT_USER_AGENT } from "../version.js";
@@ -237,6 +238,28 @@ export function createHindsightClient(config: ResolvedConfig): HindsightLikeClie
       withTimeout("hindsight getBankConfig", timeoutMs, (signal) =>
         withRetry("getBankConfig", () => raw.getBankConfig(bankId, { signal })),
       ),
+    listBanks: (options) =>
+      withTimeout(
+        "hindsight listBanks",
+        timeoutMs,
+        (signal) =>
+          withRetry("listBanks", async () => {
+            // Hindsight 0.10 list-banks accepts q/limit/offset. The 0.9 generated
+            // client types still declare query as never; the HTTP query is documented.
+            const query = {
+              ...(options?.q ? { q: options.q } : {}),
+              ...(options?.limit !== undefined ? { limit: options.limit } : {}),
+              ...(options?.offset !== undefined ? { offset: options.offset } : {}),
+            };
+            const response = await sdk.listBanks({
+              client: lowLevel,
+              ...(Object.keys(query).length > 0 ? { query: query as never } : {}),
+              signal,
+            });
+            return unwrapSdkResponse(response, "listBanks");
+          }),
+        options?.signal,
+      ),
     importBankTemplate: (bankId, manifest, options) =>
       withTimeout(
         "hindsight importBankTemplate",
@@ -375,8 +398,15 @@ export async function checkHindsight(
 ): Promise<{ ok: boolean; error?: string }> {
   try {
     if (client.health) await client.health();
-    else if (client.getBankProfile) await client.getBankProfile(bankId);
-    else await client.recall(bankId, "health check", { maxTokens: 1, budget: "low" });
+    else if (client.listBanks) await client.listBanks({ q: bankId, limit: 1 });
+    else if (client.getBankProfile) {
+      try {
+        await client.getBankProfile(bankId);
+      } catch (error) {
+        // Profile retired in Hindsight v0.10; 410 still proves the server responded.
+        if (!isGoneError(error)) throw error;
+      }
+    } else await client.recall(bankId, "health check", { maxTokens: 1, budget: "low" });
     return { ok: true };
   } catch (error) {
     return { ok: false, error: redactError(error) };

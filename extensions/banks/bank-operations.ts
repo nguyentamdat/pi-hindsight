@@ -83,32 +83,116 @@ export function resolveBankMissions(
   };
 }
 
-function isNotFoundError(error: unknown): boolean {
-  if (typeof error !== "object" || !error) return false;
-  const fields = error as {
+function errorFields(error: unknown): {
+  status?: unknown;
+  statusCode?: unknown;
+  code?: unknown;
+  message?: unknown;
+} {
+  if (typeof error !== "object" || !error) return {};
+  return error as {
     status?: unknown;
     statusCode?: unknown;
     code?: unknown;
     message?: unknown;
   };
+}
+
+function isHttpStatus(error: unknown, status: number): boolean {
+  const fields = errorFields(error);
   return (
-    fields.status === 404 ||
-    fields.statusCode === 404 ||
-    fields.code === 404 ||
-    fields.code === "404" ||
-    (typeof fields.message === "string" && /\b404\b|not found/i.test(fields.message))
+    fields.status === status ||
+    fields.statusCode === status ||
+    fields.code === status ||
+    fields.code === String(status)
   );
 }
 
-async function bankNeedsCreate(client: HindsightLikeClient, bankId: string): Promise<boolean> {
-  if (!client.getBankProfile) return false;
+export function isNotFoundError(error: unknown): boolean {
+  if (isHttpStatus(error, 404)) return true;
+  const message = errorFields(error).message;
+  return typeof message === "string" && /\b404\b|not found/i.test(message);
+}
+
+export function isGoneError(error: unknown): boolean {
+  if (isHttpStatus(error, 410)) return true;
+  const message = errorFields(error).message;
+  return (
+    typeof message === "string" &&
+    (/\b410\b/.test(message) || /bank profile endpoints have been removed/i.test(message))
+  );
+}
+
+const LIST_BANKS_PAGE_SIZE = 100;
+const LIST_BANKS_MAX_OFFSET = 10_000;
+
+function listedBankIds(result: unknown): string[] | undefined {
+  if (typeof result !== "object" || !result) return undefined;
+  const banks = (result as { banks?: unknown }).banks;
+  if (!Array.isArray(banks)) return undefined;
+  return banks.flatMap((item) => {
+    if (typeof item !== "object" || !item) return [];
+    const record = item as { bank_id?: unknown; bankId?: unknown };
+    const id = record.bank_id ?? record.bankId;
+    return typeof id === "string" ? [id] : [];
+  });
+}
+
+/** Official v0.10 existence check: GET /banks?q= plus exact bank_id match (Hindsight #4127). */
+async function bankExistsViaList(
+  client: HindsightLikeClient,
+  bankId: string,
+): Promise<boolean | undefined> {
+  if (!client.listBanks) return undefined;
+  try {
+    for (let offset = 0; offset <= LIST_BANKS_MAX_OFFSET; offset += LIST_BANKS_PAGE_SIZE) {
+      const listed = await client.listBanks({
+        q: bankId,
+        limit: LIST_BANKS_PAGE_SIZE,
+        ...(offset > 0 ? { offset } : {}),
+      });
+      const ids = listedBankIds(listed);
+      if (!ids) return undefined;
+      if (ids.includes(bankId)) return true;
+      if (ids.length < LIST_BANKS_PAGE_SIZE) return false;
+    }
+    // Truncated after the scan cap: do not create (avoids mission overwrite).
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Bank existence for Hindsight 0.10+: list-banks exact `bank_id`, then profile fallback.
+ * `true` = exists, `false` = missing, `undefined` = inconclusive (no list, profile retired/absent).
+ * Unexpected profile errors are thrown. Do not use GET /config (it 200s for missing banks).
+ */
+export async function resolveBankExistence(
+  client: HindsightLikeClient,
+  bankId: string,
+): Promise<boolean | undefined> {
+  const listed = await bankExistsViaList(client, bankId);
+  if (listed === true || listed === false) return listed;
+
+  if (!client.getBankProfile) return undefined;
   try {
     await client.getBankProfile(bankId);
-    return false;
+    return true;
   } catch (error) {
-    if (isNotFoundError(error)) return true;
+    if (isNotFoundError(error)) return false;
+    // Profile retired in Hindsight v0.10.0 (#4127). Without a list result, existence is unknown.
+    if (isGoneError(error)) return undefined;
     throw error;
   }
+}
+
+async function bankNeedsCreate(client: HindsightLikeClient, bankId: string): Promise<boolean> {
+  const exists = await resolveBankExistence(client, bankId);
+  if (exists === true) return false;
+  if (exists === false) return true;
+  // Inconclusive (no list, profile retired/absent): do not create (avoids mission overwrite).
+  return false;
 }
 
 export async function ensureProjectBank(

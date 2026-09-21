@@ -22,6 +22,7 @@ import {
   type ImportRetainResult,
   isImportRetainQueuedError,
   previewImportBranch,
+  previewImportBranchWithQueueAdmission,
   retainImportBranch,
 } from "./import-execute.js";
 import { importDocumentId } from "../utils/session.js";
@@ -138,7 +139,9 @@ export async function executeImportPlan(args: {
       message: `Projecting branch ${branch.leafId}`,
       sessionFile,
     });
-    const previews = previewImportBranch(common);
+    const previews = args.dryRun
+      ? await previewImportBranchWithQueueAdmission(common)
+      : previewImportBranch(common);
     for (const [index, preview] of previews.entries()) {
       args.onProgress?.({
         phase: args.dryRun ? "previewing" : "retaining",
@@ -754,6 +757,7 @@ export async function importProjectSessions(args: {
   cwd: string;
   currentSessionFile?: string;
   searchDir?: string;
+  sessionFiles?: string[];
   bankId: string;
   client: HindsightLikeClient;
   config: ResolvedConfig;
@@ -762,11 +766,14 @@ export async function importProjectSessions(args: {
   onProgress?: ImportProgressReporter;
 }): Promise<ImportProjectSessionsResult> {
   args.onProgress?.({ phase: "discovering", message: "Scanning project session files" });
-  const discovery = await discoverProjectSessionFiles({
-    cwd: args.cwd,
-    ...(args.currentSessionFile ? { currentSessionFile: args.currentSessionFile } : {}),
-    ...(args.searchDir ? { searchDir: args.searchDir } : {}),
-  });
+  const discovery =
+    args.sessionFiles !== undefined
+      ? { sessionFiles: [...args.sessionFiles].sort(), scanned: args.sessionFiles.length }
+      : await discoverProjectSessionFiles({
+          cwd: args.cwd,
+          ...(args.currentSessionFile ? { currentSessionFile: args.currentSessionFile } : {}),
+          ...(args.searchDir ? { searchDir: args.searchDir } : {}),
+        });
   args.onProgress?.({
     phase: "discovered",
     message: `Found ${discovery.sessionFiles.length} project session${discovery.sessionFiles.length === 1 ? "" : "s"} after scanning ${discovery.scanned} file${discovery.scanned === 1 ? "" : "s"}`,

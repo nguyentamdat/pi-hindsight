@@ -4,10 +4,8 @@ import {
   type ExtensionAPI,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { MemoryOperationsDeps } from "./memory-operation-service.js";
-import { createMemoryOperations } from "./memory-operation-service.js";
+import type { MemoryOperations, MemoryOperationsDeps } from "./memory-operation-service.js";
 import { formatReflectResult } from "./reflect-presenter.js";
-import { runHindsightSetupTui } from "../tui/setup-tui.js";
 import { renderMemoryToolTextResult, retainToolResponse } from "../tui/tool-presenters.js";
 import { getSessionFile } from "../utils/session.js";
 
@@ -146,7 +144,13 @@ export interface OperationCatalog {
 }
 
 export function createOperationCatalog(deps: MemoryOperationsDeps): OperationCatalog {
-  const operations = createMemoryOperations(deps);
+  let operations: Promise<MemoryOperations> | undefined;
+  const loadOperations = () => {
+    operations ??= import("./memory-operation-service.js").then(({ createMemoryOperations }) =>
+      createMemoryOperations(deps),
+    );
+    return operations;
+  };
   const useCwd = (cwd: string) => deps.reloadConfig?.(cwd);
 
   function defineCatalogTool<TParams extends ToolDefinition["parameters"], TDetails = unknown>(
@@ -268,6 +272,7 @@ export function createOperationCatalog(deps: MemoryOperationsDeps): OperationCat
       }),
       async execute(_id, params, signal, _onUpdate, ctx) {
         useCwd(ctx.cwd);
+        const operations = await loadOperations();
         const sessionFile = ctx.sessionManager.getSessionFile?.();
         const { bankId, result } = await operations.recall(
           ctx.cwd,
@@ -337,6 +342,7 @@ export function createOperationCatalog(deps: MemoryOperationsDeps): OperationCat
       }),
       async execute(_id, params, signal, _onUpdate, ctx) {
         useCwd(ctx.cwd);
+        const operations = await loadOperations();
         const sessionFile = ctx.sessionManager.getSessionFile?.();
         const result = await operations.retainExplicit({
           cwd: ctx.cwd,
@@ -370,6 +376,7 @@ export function createOperationCatalog(deps: MemoryOperationsDeps): OperationCat
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
         useCwd(ctx.cwd);
+        const operations = await loadOperations();
         const sessionFile = ctx.sessionManager.getSessionFile?.();
         const result = await operations.retainExplicit({
           cwd: ctx.cwd,
@@ -448,6 +455,7 @@ export function createOperationCatalog(deps: MemoryOperationsDeps): OperationCat
       }),
       async execute(_id, params, signal, _onUpdate, ctx) {
         useCwd(ctx.cwd);
+        const operations = await loadOperations();
         const { bankId, result } = await operations.reflect(
           ctx.cwd,
           params.query,
@@ -498,6 +506,7 @@ export function createOperationCatalog(deps: MemoryOperationsDeps): OperationCat
       async execute(_id, _params, signal, _onUpdate, ctx) {
         useCwd(ctx.cwd);
         if (signal?.aborted) throw new Error("Aborted");
+        const operations = await loadOperations();
         const result = await operations.status(ctx.cwd);
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -533,6 +542,7 @@ export function createOperationCatalog(deps: MemoryOperationsDeps): OperationCat
       async execute(_id, params, signal, _onUpdate, ctx) {
         useCwd(ctx.cwd);
         if (signal?.aborted) throw new Error("Aborted");
+        const operations = await loadOperations();
         const result = await operations.seedGitLog({
           cwd: ctx.cwd,
           ...(params.limit !== undefined ? { limit: params.limit } : {}),
@@ -555,6 +565,7 @@ export function createOperationCatalog(deps: MemoryOperationsDeps): OperationCat
       async execute(_id, _params, signal, _onUpdate, ctx) {
         useCwd(ctx.cwd);
         if (signal?.aborted) throw new Error("Aborted");
+        const operations = await loadOperations();
         const result = operations.scopeInfo(ctx.cwd);
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -567,7 +578,7 @@ export function createOperationCatalog(deps: MemoryOperationsDeps): OperationCat
       name: "hindsight_config",
       label: "Hindsight Config",
       description:
-        "Get or patch allowlisted Pi Hindsight config (project or global file). action=get returns effective values (no secrets) and the allowlist. action=patch updates only typed allowlisted keys (setupComplete, scopeMode, projectId, projectIdStrategy, includeSharedObservations, projectBankId, enableGlobalBank, globalBankId, agentUse, mentalModelsInject, memoryProfile, recall/retain knobs, baseUrl, apiKeyEnvVar, timeoutMs). dryRun defaults true for patch. Domain-tagged setupComplete requires projectBankId. Never pass raw API keys — use apiKeyEnvVar.",
+        "Get or patch allowlisted Pi Hindsight config (project or global file). action=get returns effective values (no secrets) and the allowlist. action=patch updates only typed allowlisted keys (setupComplete, scopeMode, projectId, projectIdStrategy, includeSharedObservations, userScopeTags, projectBankId, enableGlobalBank, globalBankId, agentUse, mentalModelsInject, memoryProfile, recall/retain knobs, baseUrl, apiKeyEnvVar, timeoutMs). dryRun defaults true for patch. Domain-tagged setupComplete requires projectBankId. Never pass raw API keys — use apiKeyEnvVar.",
       parameters: Type.Object({
         action: Type.Union([Type.Literal("get"), Type.Literal("patch")]),
         patch: Type.Optional(
@@ -582,6 +593,12 @@ export function createOperationCatalog(deps: MemoryOperationsDeps): OperationCat
                 Type.Union([Type.Literal("remote"), Type.Literal("basename")]),
               ),
               includeSharedObservations: Type.Optional(Type.Boolean()),
+              userScopeTags: Type.Optional(
+                Type.Array(Type.String(), {
+                  description:
+                    "User/life bank recall tags (any_strict). Empty array disables the tag filter. Writes scope.userScopeTags.",
+                }),
+              ),
               projectBankId: Type.Optional(Type.String({ minLength: 1 })),
               enableGlobalBank: Type.Optional(Type.Boolean()),
               globalBankId: Type.Optional(Type.String({ minLength: 1 })),
@@ -627,6 +644,7 @@ export function createOperationCatalog(deps: MemoryOperationsDeps): OperationCat
       async execute(_id, params, signal, _onUpdate, ctx) {
         useCwd(ctx.cwd);
         if (signal?.aborted) throw new Error("Aborted");
+        const operations = await loadOperations();
         const result = await operations.config({
           action: params.action,
           cwd: ctx.cwd,
@@ -645,7 +663,7 @@ export function createOperationCatalog(deps: MemoryOperationsDeps): OperationCat
       name: "hindsight_bank",
       label: "Hindsight Bank",
       description:
-        "Inspect or update the selected coding/life bank. action=get returns profile/stats/config. action=update_mission patches retain/reflect/observations mission (dryRun default true for safety).",
+        "Inspect or update the selected coding/life bank. action=get returns exists/stats/config (list-banks existence; retired /profile is not a hard failure). action=update_mission patches retain/reflect/observations mission (dryRun default true for safety).",
       parameters: Type.Object({
         action: Type.Union([Type.Literal("get"), Type.Literal("update_mission")]),
         bank: Type.Optional(
@@ -663,6 +681,7 @@ export function createOperationCatalog(deps: MemoryOperationsDeps): OperationCat
       async execute(_id, params, signal, _onUpdate, ctx) {
         useCwd(ctx.cwd);
         if (signal?.aborted) throw new Error("Aborted");
+        const operations = await loadOperations();
         if (params.action === "get") {
           const result = await operations.bankGet({
             ...(params.bank ? { bank: params.bank } : {}),
@@ -725,6 +744,7 @@ export function createOperationCatalog(deps: MemoryOperationsDeps): OperationCat
           params.action === "update" ||
           params.action === "refresh" ||
           params.action === "delete";
+        const operations = await loadOperations();
         const result = await operations.mentalModel({
           action: params.action,
           cwd: ctx.cwd,
@@ -802,6 +822,7 @@ export function createOperationCatalog(deps: MemoryOperationsDeps): OperationCat
           params.action === "update" ||
           params.action === "delete" ||
           params.action === "seed_taxonomy";
+        const operations = await loadOperations();
         const result = await operations.knowledge({
           action: params.action,
           cwd: ctx.cwd,
@@ -848,6 +869,7 @@ export function createOperationCatalog(deps: MemoryOperationsDeps): OperationCat
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
         useCwd(ctx.cwd);
+        const operations = await loadOperations();
         const result = await operations.scopeMigrateDryRun(ctx.cwd, {
           ...(params.bankTags ? { bankTags: params.bankTags } : {}),
           ...(params.writeReceipt !== undefined ? { writeReceipt: params.writeReceipt } : {}),
@@ -870,6 +892,7 @@ export function createOperationCatalog(deps: MemoryOperationsDeps): OperationCat
         description:
           "Open Hindsight memory hub (status, mode, next-opt-out, mental models, import, flush, doctor, setup).",
         handler: async (_args, ctx) => {
+          const { runHindsightSetupTui } = await import("../tui/setup-tui.js");
           await runHindsightSetupTui(ctx, deps);
         },
       },
@@ -879,6 +902,7 @@ export function createOperationCatalog(deps: MemoryOperationsDeps): OperationCat
       spec: {
         description: "Skip automatic retain for the next agent run in this session.",
         handler: async (_args, ctx) => {
+          const operations = await loadOperations();
           const result = await operations.setNextRetainOff(ctx.cwd, getSessionFile(ctx));
           ctx.ui.notify(
             `Hindsight will skip automatic retain for the next agent run in this session. nextRetain=${result.meta.nextRetainMode}`,

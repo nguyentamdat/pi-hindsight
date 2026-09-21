@@ -1,4 +1,5 @@
 import { resolveProjectIdentity } from "../banks/banking.js";
+import { resolveBankExistence } from "../banks/bank-operations.js";
 import { resolveOperationBank } from "../banks/bank-selection.js";
 import { buildStatusFields } from "../utils/status-fields.js";
 import type { MemoryOperationsDeps } from "./memory-operation-types.js";
@@ -14,6 +15,7 @@ export const AGENT_CONFIG_ALLOWLIST = [
   "projectId",
   "projectIdStrategy",
   "includeSharedObservations",
+  "userScopeTags",
   "projectBankId",
   "enableGlobalBank",
   "globalBankId",
@@ -47,6 +49,7 @@ export function agentConfigView(config: ResolvedConfig): Record<AgentConfigKey, 
     projectId: config.scope.projectId,
     projectIdStrategy: config.scope.projectIdStrategy,
     includeSharedObservations: config.scope.includeSharedObservations,
+    userScopeTags: config.scope.userScopeTags,
     projectBankId: config.banks.project.bankId,
     enableGlobalBank: config.banks.user.enabled,
     globalBankId: config.banks.user.bankId,
@@ -84,6 +87,8 @@ const BOOLEAN_KEYS = new Set<AgentConfigKey>([
 
 const NUMBER_KEYS = new Set<AgentConfigKey>(["recallMaxTokens", "timeoutMs"]);
 
+const STRING_ARRAY_KEYS = new Set<AgentConfigKey>(["userScopeTags"]);
+
 function assertAgentConfigValue(key: AgentConfigKey, value: unknown): unknown {
   if (BOOLEAN_KEYS.has(key)) {
     if (typeof value !== "boolean") {
@@ -94,6 +99,12 @@ function assertAgentConfigValue(key: AgentConfigKey, value: unknown): unknown {
   if (NUMBER_KEYS.has(key)) {
     if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
       throw new Error(`Config field ${key} must be a non-negative number`);
+    }
+    return value;
+  }
+  if (STRING_ARRAY_KEYS.has(key)) {
+    if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+      throw new Error(`Config field ${key} must be an array of strings`);
     }
     return value;
   }
@@ -278,12 +289,14 @@ export function createControlOperations(deps: MemoryOperationsDeps) {
         projectBankId: deps.getProjectBankId(),
       });
       const client = deps.getClient();
-      const [profile, stats, bankConfig] = await Promise.all([
-        client.getBankProfile?.(bankId),
+      // Existence via list-banks (profile fallback). Isolate so a retired /profile 410
+      // cannot fail stats/config. Do not treat GET /config as existence (Hindsight #4127).
+      const [exists, stats, bankConfig] = await Promise.all([
+        resolveBankExistence(client, bankId),
         client.getBankStats?.(bankId),
         client.getBankConfig?.(bankId),
       ]);
-      return { bankId, profile, stats, config: bankConfig };
+      return { bankId, exists: exists ?? null, stats, config: bankConfig };
     },
 
     async bankUpdateMission(args: {

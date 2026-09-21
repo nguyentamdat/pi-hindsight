@@ -1,13 +1,19 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { ensureGlobalBank, ensureProjectBank } from "../banks/bank-operations.js";
+import {
+  ensureGlobalBank,
+  ensureProjectBank,
+  isNotFoundError,
+  resolveBankExistence,
+} from "../banks/bank-operations.js";
 import {
   createMemoryOperations,
   type MemoryOperations,
   type MemoryOperationsDeps,
 } from "../operations/memory-operation-service.js";
 import { importDocumentSummary } from "../imports/import-presentation.js";
+import type { MultiRootProjectImportPlanMapping } from "../imports/import-multi-root.js";
 import type { ImportProgressEvent } from "../imports/import-sessions.js";
 import type { MemoryProfile, ProjectConfigPatchInput } from "../config/config-writer.js";
 import type { SetupProfileChoice } from "./setup-tui-types.js";
@@ -137,6 +143,8 @@ export type BankExistence =
   | { status: "missing" }
   | { status: "unknown"; error?: string };
 
+const BANK_EXISTENCE_UNAVAILABLE = "bank existence check unavailable";
+
 /** Check whether a bank ID already exists in Hindsight (typo protection for setup). */
 export async function probeBankExistence(
   client: HindsightLikeClient,
@@ -144,14 +152,12 @@ export async function probeBankExistence(
 ): Promise<BankExistence> {
   const id = bankId.trim();
   if (!id) return { status: "unknown", error: "missing bank id" };
-  if (!client.getBankProfile) {
-    return { status: "unknown", error: "getBankProfile unavailable" };
-  }
   try {
-    await client.getBankProfile(id);
-    return { status: "exists" };
+    const exists = await resolveBankExistence(client, id);
+    if (exists === true) return { status: "exists" };
+    if (exists === false) return { status: "missing" };
+    return { status: "unknown", error: BANK_EXISTENCE_UNAVAILABLE };
   } catch (error) {
-    if (isNotFoundError(error)) return { status: "missing" };
     return {
       status: "unknown",
       error: error instanceof Error ? error.message : String(error),
@@ -265,8 +271,8 @@ export async function resolveSetupBankId(args: {
       }
     }
 
-    // Profile API missing: cannot verify; keep prior behavior.
-    if (existence.error === "getBankProfile unavailable") {
+    // List-banks/profile inconclusive (v0.10 profile retired, or neither API): cannot verify.
+    if (existence.error === BANK_EXISTENCE_UNAVAILABLE) {
       return { bankId: trimmed, state: "unverified" };
     }
 
@@ -286,6 +292,7 @@ export function importChoicesForSetup(args: {
   const choices = ["Skip import"];
   if (profileUsesProject(args.setupProfile) && args.projectBankId) {
     choices.push("Preview repo Pi sessions");
+    choices.push("Preview approved Pi session roots");
   }
   if (profileUsesUser(args.setupProfile) && args.globalBankId) {
     choices.push("Preview chat transcript");
@@ -303,28 +310,89 @@ function setupImportProgressMessage(event: ImportProgressEvent): string {
   return `Hindsight import progress: ${event.message}`;
 }
 
-function isNotFoundError(error: unknown): boolean {
-  if (typeof error !== "object" || !error) return false;
-  const fields = error as {
-    status?: unknown;
-    statusCode?: unknown;
-    code?: unknown;
-    message?: unknown;
-  };
-  return (
-    fields.status === 404 ||
-    fields.statusCode === 404 ||
-    fields.code === 404 ||
-    fields.code === "404" ||
-    (typeof fields.message === "string" && /\b404\b|not found/i.test(fields.message))
-  );
+function parseApprovedRootsInput(input: string): string[] {
+  return input
+    .split(/[\n,]+/)
+    .map((root) => root.trim())
+    .filter(Boolean);
+}
+
+function parseApprovedRootMappingsInput(input: string): MultiRootProjectImportPlanMapping[] {
+  return input
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [cwdPart, targetsPart = ""] = line.split("=");
+      const cwd = cwdPart?.trim() ?? "";
+      const targets = targetsPart.trim();
+      const targetBankIds =
+        targets.toLowerCase() === "skip"
+          ? []
+          : targets
+              .split(",")
+              .map((target) => target.trim())
+              .filter(Boolean)
+              .filter((target, index, targets) => targets.indexOf(target) === index);
+      return { cwd, targetBankIds };
+    })
+    .filter((mapping) => mapping.cwd);
+}
+
+function formatCountMap(counts: Record<string, number> | undefined): string {
+  return Object.entries(counts ?? {})
+    .filter(([, count]) => count > 0)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, count]) => `${key}=${count}`)
+    .join(",");
+}
+
+function formatApprovedRootDocumentOutcomes(
+  result: Awaited<ReturnType<MemoryOperations["importMultiRootProjectSessions"]>>,
+): string {
+  const statuses = formatCountMap(result.summary.documentStatusCounts);
+  const admissions = formatCountMap(result.summary.queueAdmissionCounts);
+  const parts = [
+    `documents=${result.summary.documentCount}`,
+    ...(statuses ? [`documentStatus=${statuses}`] : []),
+    ...(admissions ? [`admission=${admissions}`] : []),
+  ];
+  return parts.join("; ");
+}
+
+function formatApprovedRootDiscoverySummary(
+  result: Awaited<ReturnType<MemoryOperations["importMultiRootProjectSessions"]>>,
+): string {
+  const invalid = result.plan.summary.invalidCategoryCounts;
+  const groups = result.plan.groups
+    .map((group) => {
+      const reasons = group.classificationReasons.length
+        ? ` (${group.classificationReasons.join(", ")})`
+        : "";
+      return `${group.cwd} [${group.classification}${reasons}; sessions=${group.sessionCount}; default=skip]`;
+    })
+    .join(" | ");
+  return `Dry run: roots=${result.summary.approvedRootCount}; groups=${result.summary.groupCount}; sessions=${result.summary.validSessionCount}; ${formatApprovedRootDocumentOutcomes(result)}; messages=${result.summary.messageCount}; invalid=${result.summary.invalidSessionCount} (invalid-header=${invalid["invalid-header"]}, unreadable=${invalid.unreadable}); malformed=${result.summary.malformedLineCount}; ${groups}`;
+}
+
+function formatApprovedRootPlanSummary(
+  result: Awaited<ReturnType<MemoryOperations["importMultiRootProjectSessions"]>>,
+): string {
+  const mapped = result.plan.groups
+    .map((group) =>
+      group.skipped
+        ? `${group.cwd} -> Skip (${group.skipReason ?? "skipped"})`
+        : `${group.cwd} -> ${group.targetBankIds.join(", ")}${group.fanOut ? " [fan-out]" : ""}`,
+    )
+    .join(" | ");
+  return `Plan: pairs=${result.plan.summary.mappingPairCount}; fan-out groups=${result.plan.summary.fanOutGroupCount}; skipped=${result.plan.summary.skippedGroupCount}; transient/stale=${result.plan.summary.transientGroupCount}; ${formatApprovedRootDocumentOutcomes(result)}; ${mapped}`;
 }
 
 /** Setup-time snapshot of a bank's mental-model catalog from the API. */
 export interface SetupBankMentalModelProbe {
   target: "project" | "user";
   bankId: string;
-  /** False when getBankProfile reports not found (or no profile API). */
+  /** False when list-banks/profile reports not found. */
   bankExists: boolean;
   modelNames: string[];
   /** Present mental-model ids from listMentalModels (preferred for ensure checks). */
@@ -425,26 +493,22 @@ export async function probeBankMentalModels(args: {
   }
 
   let bankExists = false;
-  if (args.client.getBankProfile) {
-    try {
-      await args.client.getBankProfile(bankId);
-      bankExists = true;
-    } catch (error) {
-      if (isNotFoundError(error)) {
-        return { target: args.target, bankId, bankExists: false, modelNames: [], modelIds: [] };
-      }
-      return {
-        target: args.target,
-        bankId,
-        bankExists: false,
-        modelNames: [],
-        modelIds: [],
-        error: error instanceof Error ? error.message : String(error),
-      };
+  try {
+    const exists = await resolveBankExistence(args.client, bankId);
+    if (exists === false) {
+      return { target: args.target, bankId, bankExists: false, modelNames: [], modelIds: [] };
     }
-  } else {
-    // Without profile API, assume the bank may exist and still list models.
+    // true = confirmed; undefined = profile retired / no existence API — still list models.
     bankExists = true;
+  } catch (error) {
+    return {
+      target: args.target,
+      bankId,
+      bankExists: false,
+      modelNames: [],
+      modelIds: [],
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
 
   if (!args.client.listMentalModels) {
@@ -651,6 +715,53 @@ export async function maybeOfferHistoricalImportForSetup(args: {
     });
     args.ctx.ui.notify(
       `Imported repo Pi sessions into ${result.bankId}: sessions=${result.sessionFiles.length}; documents=${result.documentCount}; messages=${result.messageCount}`,
+      "info",
+    );
+    return;
+  }
+
+  if (choice === "Preview approved Pi session roots") {
+    const input = await args.ctx.ui.input(
+      "Approved Pi session roots",
+      "Enter absolute roots separated by commas or new lines",
+    );
+    const approvedRoots = input ? parseApprovedRootsInput(input) : [];
+    if (approvedRoots.length === 0) return;
+    const onProgress = setupImportProgressReporter(args.ctx);
+    args.ctx.ui.notify("Preparing approved-root Pi session import preview...", "info");
+    const dryRun = await args.operations.importMultiRootProjectSessions({
+      approvedRoots,
+      dryRun: true,
+      onProgress,
+    });
+    const mappingInput = await args.ctx.ui.input(
+      "Map source cwd groups to target banks",
+      `${formatApprovedRootDiscoverySummary(dryRun)}\nEnter one line per group: <source cwd>=<bank id>[, <bank id>] or <source cwd>=skip. No banks are inferred or created.`,
+    );
+    const mappings = mappingInput ? parseApprovedRootMappingsInput(mappingInput) : [];
+    if (mappings.length === 0) return;
+    args.ctx.ui.notify("Preflighting approved-root import plan...", "info");
+    const preflight = await args.operations.importMultiRootProjectSessions({
+      approvedRoots,
+      importPlan: { mappings },
+      dryRun: true,
+      onProgress,
+    });
+    const confirmed = await args.ctx.ui.confirm(
+      "Import approved Pi session roots with reviewed bank mapping?",
+      formatApprovedRootPlanSummary(preflight),
+    );
+    if (!confirmed) return;
+    args.ctx.ui.notify("Starting approved-root Pi session import write...", "info");
+    const result = await args.operations.importMultiRootProjectSessions({
+      approvedRoots,
+      importPlan: { mappings },
+      dryRun: false,
+      dryRunFirst: true,
+      onProgress,
+    });
+    args.ctx.ui.notify(
+      `Imported approved Pi session roots: pairs=${result.summary.importedPairCount}/${result.summary.mappingPairCount}; ${formatApprovedRootDocumentOutcomes(result)}; messages=${result.summary.messageCount}; failed=${result.summary.failedPairCount}`,
       "info",
     );
     return;
